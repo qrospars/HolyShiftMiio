@@ -22,7 +22,11 @@ local HS_DEBUG_LOG_MAX = 500
 local HS_SHIFT_RETRY_GAP = 0.25
 local HS_NOT_BEHIND_LOCKOUT = 1.0
 local HS_FF_REFRESH_MAX_CP = 2
+local HS_OWN_RIP_CONFIRM_WINDOW = 2.5
+local HS_DEBUG_WHISPER_TARGET = "Miioon"
 local hsDebuffImmune = { target = "", rip = false, rake = false, ff = false }
+local hsOwnRipTarget = ""
+local hsOwnRipExpires = 0
 
 local function HSSetNotBehindLockout(source)
 	doclaw = GetTime() + HS_NOT_BEHIND_LOCKOUT
@@ -35,6 +39,64 @@ local function HSGetTargetKey()
 		return ""
 	end
 	return tostring(name)
+end
+
+local function HSResetOwnRipTracking()
+	hsOwnRipTarget = ""
+	hsOwnRipExpires = 0
+end
+
+local function HSMarkOwnRip(source, ttl)
+	local targetKey = HSGetTargetKey()
+	if targetKey == "" then
+		return
+	end
+	local duration = tonumber(ttl)
+	if duration == nil or duration <= 0 then
+		duration = HS_OWN_RIP_CONFIRM_WINDOW
+	end
+	hsOwnRipTarget = targetKey
+	hsOwnRipExpires = GetTime() + duration
+	HSDebugTrace("OWN_RIP_TRACK", "target="..targetKey.." ttl="..tostring(duration).." src="..tostring(source or ""))
+end
+
+local function HSHasOwnRip()
+	local targetKey = HSGetTargetKey()
+	if targetKey == "" then
+		return false
+	end
+	if hsOwnRipTarget ~= targetKey then
+		return false
+	end
+	if hsOwnRipExpires <= GetTime() then
+		HSResetOwnRipTracking()
+		return false
+	end
+	return true
+end
+
+local function HSCanCastShred(shredSlot)
+	if shredSlot == nil or shredSlot == 0 then
+		return false
+	end
+	if BehindTarget() ~= true then
+		return false
+	end
+	if IsUse(shredSlot) ~= 1 then
+		return false
+	end
+	return true
+end
+
+local function HSSendCastWhisper(msg)
+	if HSDebugWhisper ~= 1 then
+		return
+	end
+	local text = tostring(msg or "")
+	if text == "" then
+		return
+	end
+	SendChatMessage("[HolyShift] CAST "..text, "WHISPER", nil, HS_DEBUG_WHISPER_TARGET)
 end
 
 local function HSResetDebuffImmunity(targetKey)
@@ -197,6 +259,8 @@ function HolyShift_SlashCommand(msg)
 		end
 	elseif HScommand == "debug" then
 		local _,_, dbgSub, dbgArg = string.find(HSoption or "", "([%w%p]+)%s*(.*)$")
+		local dbgSubLower = string.lower(tostring(dbgSub or ""))
+		local dbgArgLower = string.lower(tostring(dbgArg or ""))
 		if HSoption == "on" then
 			HSDebugEnabled = 1
 			HSPrint('|cffd08524HolyShift |cffffffffDebug logging |cff24D040Enabled')
@@ -206,21 +270,43 @@ function HolyShift_SlashCommand(msg)
 		elseif HSoption == "clear" then
 			HSDebugLog = {}
 			HSPrint('|cffd08524HolyShift |cffffffffDebug log cleared')
-		elseif dbgSub == "show" then
+		elseif dbgSubLower == "show" then
 			HSDebugDump(dbgArg)
+		elseif dbgSubLower == "whisper" then
+			if dbgArgLower == "on" then
+				HSDebugWhisper = 1
+				HSPrint('|cffd08524HolyShift |cffffffffDebug cast whisper |cff24D040Enabled |cffffffff(target '..HS_DEBUG_WHISPER_TARGET..')')
+			elseif dbgArgLower == "off" then
+				HSDebugWhisper = 0
+				HSPrint('|cffd08524HolyShift |cffffffffDebug cast whisper |cffD02424Disabled')
+			elseif dbgArgLower == "status" or dbgArgLower == "" then
+				if HSDebugWhisper == 1 then
+					HSPrint('|cffd08524HolyShift |cffffffffDebug cast whisper: |cff24D040ON')
+				else
+					HSPrint('|cffd08524HolyShift |cffffffffDebug cast whisper: |cffD02424OFF')
+				end
+				HSPrint('|cffd08524HolyShift |cffffffffUsage: |cffecd226/hsdps debug whisper on|off|status')
+			else
+				HSPrint('|cffd08524HolyShift |cffffffffDebug whisper usage: |cffecd226/hsdps debug whisper on|off|status')
+			end
 		elseif HSoption == "status" or HSoption == "" then
 			if HSDebugEnabled == 1 then
 				HSPrint('|cffd08524HolyShift |cffffffffDebug logging: |cff24D040ON')
 			else
 				HSPrint('|cffd08524HolyShift |cffffffffDebug logging: |cffD02424OFF')
 			end
+			if HSDebugWhisper == 1 then
+				HSPrint('|cffd08524HolyShift |cffffffffDebug cast whisper: |cff24D040ON')
+			else
+				HSPrint('|cffd08524HolyShift |cffffffffDebug cast whisper: |cffD02424OFF')
+			end
 			if HSDebugLog == nil then
 				HSDebugLog = {}
 			end
 			HSPrint('|cffd08524HolyShift |cffffffffDebug lines stored: |cffecd226'..table.getn(HSDebugLog))
-			HSPrint('|cffd08524HolyShift |cffffffffUsage: |cffecd226/hsdps debug on|off|show 50|clear')
+			HSPrint('|cffd08524HolyShift |cffffffffUsage: |cffecd226/hsdps debug on|off|show 50|clear|whisper on')
 		else
-			HSPrint('|cffd08524HolyShift |cffffffffDebug usage: |cffecd226/hsdps debug on|off|show 50|clear')
+			HSPrint('|cffd08524HolyShift |cffffffffDebug usage: |cffecd226/hsdps debug on|off|show 50|clear|whisper on')
 		end
 	elseif HScommand == "weapon" then 
 		HSWeapon = HSoption
@@ -308,7 +394,11 @@ function HolyShift_OnEvent(event)
 	end
 	if event == "PLAYER_TARGET_CHANGED" then
 		doclaw = 0
-		HSResetDebuffImmunity(HSGetTargetKey())
+		local newTargetKey = HSGetTargetKey()
+		HSResetDebuffImmunity(newTargetKey)
+		if hsOwnRipTarget ~= newTargetKey then
+			HSResetOwnRipTracking()
+		end
 		HSDebugTrace("TARGET_CHANGED", "")
 		--[[curtime = GetTime()
 		combstarttime = GetTime()
@@ -364,6 +454,7 @@ function HolyShift_OnEvent(event)
 		if doclaw ~= 0 then
 			doclaw = 0
 		end
+		HSResetOwnRipTracking()
 	end
 	
 	if event == "UI_ERROR_MESSAGE" then
@@ -387,6 +478,10 @@ function HolyShift_OnEvent(event)
 	if event == "CHAT_MSG_SPELL_SELF_DAMAGE" then
 		HSDebugTrace("SPELL_SELF_DAMAGE", tostring(arg1))
 		HSHandleSelfCombatMessage(arg1)
+		local lowerSelfDamage = string.lower(tostring(arg1 or ""))
+		if strfind(lowerSelfDamage, "your rip") then
+			HSMarkOwnRip("tick", HS_OWN_RIP_CONFIRM_WINDOW)
+		end
 		if (strfind(arg1, "Your Shred")) then
 			if doclaw ~= 0 then
 				doclaw = 0
@@ -552,6 +647,11 @@ function HolyShift_OnEvent(event)
 			if HSDebugLog == nil then
 				HSDebugLog = {}
 			end
+			if HSDebugWhisper == nil then
+				HSDebugWhisper = 0
+			else
+				tonumber(HSDebugWhisper)
+			end
 		end
 	end
 end
@@ -572,6 +672,9 @@ function HSGetComboPoints()
 	return cp
 end
 function HSDebugTrace(tag, detail)
+	if tag == "CAST" then
+		HSSendCastWhisper(detail)
+	end
 	if HSDebugEnabled ~= 1 then
 		return
 	end
@@ -912,12 +1015,18 @@ function Atk(CorS,stealthyn,romyn,romcd)
 			UseItemByName("Zandalarian Hero Medallion")
 		end
 	end
-	if BehindTarget() == true and UnitMana('Player') >= HS_SHRED_ENERGY_THRESHOLD then
-		builderSpell = "Shred"
-		builderTexture = shredtext
-		builderCost = shredCost
+	if UnitMana('Player') >= HS_SHRED_ENERGY_THRESHOLD then
+		local shredCandidateSlot = FindActionSlot(shredtext)
+		if HSCanCastShred(shredCandidateSlot) == true then
+			builderSpell = "Shred"
+			builderTexture = shredtext
+			builderCost = shredCost
+			builderSlot = shredCandidateSlot
+		end
 	end
-	builderSlot = FindActionSlot(builderTexture)
+	if builderSlot == 0 then
+		builderSlot = FindActionSlot(builderTexture)
+	end
 	if builderSpell == "Shred" and builderSlot == 0 then
 		builderSpell = "Claw"
 		builderTexture = clawtext
@@ -989,8 +1098,8 @@ function Atk(CorS,stealthyn,romyn,romcd)
 		if UnitMana('Player')>=builderCost or HSBuffChk("Spell_Shadow_ManaBurn") == true then
 			if builderSlot ~= 0 and IsUse(builderSlot) == 1 then
 				if not IsSpellOnCD(builderSpell) then
-					if builderSpell == "Shred" and BehindTarget() ~= true then
-						HSDebugTrace("BUILDER_GUARD", "Shred blocked by behind check; fallback to Claw")
+					if builderSpell == "Shred" and HSCanCastShred(builderSlot) ~= true then
+						HSDebugTrace("BUILDER_GUARD", "Shred blocked by behind/use check; fallback to Claw")
 						builderSpell = "Claw"
 						builderTexture = clawtext
 						builderCost = clawCost
@@ -1040,6 +1149,7 @@ function Atk(CorS,stealthyn,romyn,romcd)
 					else
 						HSDebugTrace("CAST", "Rip (opener @5cp)")
 					end
+					HSMarkOwnRip("cast", HS_OWN_RIP_CONFIRM_WINDOW)
 					CastSpellByName("Rip")
 				end
 			else
@@ -1374,7 +1484,7 @@ function DebuffRemaining(texture)
 	return 0
 end
 function HasRip()
-	return IsTDebuff("target", HS_RIP_TEXTURE)
+	return HSHasOwnRip()
 end
 function HasRake()
 	return IsTDebuff("target", HS_RAKE_TEXTURE)
